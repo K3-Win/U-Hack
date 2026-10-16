@@ -764,10 +764,10 @@ function setupQuickChip(btn, question) {
   });
 }
 
-setupQuickChip(chipIdentify, 'นี่คืออะไร ช่วยอธิบายให้ฟังหน่อย');
-setupQuickChip(chipAllergy, 'อันนี้กินได้ไหม มีสารก่อภูมิแพ้หรือแคลอรีเท่าไร?');
-setupQuickChip(chipHardware, 'พอร์ตตรงนี้คืออะไร ต้องเสียบสายไหน?');
-setupQuickChip(chipTranslate, 'แปลข้อความในมุมมองนี้ให้ฟังหน่อย');
+setupQuickChip(chipIdentify, 'ตรงหน้านี้คืออะไร ช่วยอธิบายรายละเอียดให้ฟังหน่อย');
+setupQuickChip(chipAllergy, 'ทางข้างหน้าโล่งไหม มีสิ่งกีดขวางอะไรต้องระวังบ้าง');
+setupQuickChip(chipTranslate, 'อ่านหรือแปลข้อความที่เห็นตรงหน้าให้ฟังหน่อย');
+setupQuickChip(chipHardware, 'ช่วยอธิบายสิ่งของและสภาพแวดล้อมรอบตัวในภาพนี้ให้ละเอียดหน่อย');
 
 // Camera Controls
 btnFlipCamera.addEventListener('click', async () => {
