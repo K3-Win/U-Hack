@@ -1,5 +1,5 @@
 /**
- * ElevenLabs Text-to-Speech (TTS) Integration with Fast Streaming, Caching & Sentence Pipelining
+ * ElevenLabs Text-to-Speech (TTS) Integration with Reliable Mobile Completion & Caching
  */
 
 export class ElevenLabsManager {
@@ -18,12 +18,10 @@ export class ElevenLabsManager {
     this.requestId = 0;
     this.abortController = null;
     this.currentResolve = null;
-    this.audioCache = new Map(); // key: `${voiceId}:${text}` -> Blob
+    this.playbackSafetyTimer = null;
+    this.audioCache = new Map();
   }
 
-  /**
-   * Unlocks HTMLAudioElement on mobile browsers (iOS Safari / Android Chrome)
-   */
   unlockAudio() {
     if (this.audioUnlocked || !this.currentAudio) return;
     try {
@@ -97,15 +95,10 @@ export class ElevenLabsManager {
     return this.available;
   }
 
-  /**
-   * Splits longer responses into short speakable chunks so Sentence 1 starts playing almost immediately
-   * while Sentence 2 is synthesized in parallel in the background.
-   */
   splitIntoChunks(text) {
     const cleaned = (text || '').replace(/\s+/g, ' ').trim();
-    if (cleaned.length <= 75) return [cleaned];
+    if (cleaned.length <= 85) return [cleaned];
 
-    // Split on Thai polite particles followed by space, or standard sentence punctuation
     const rawParts = cleaned
       .split(/(?<=(?:ครับ|ค่ะ|นะคะ|นะครับ|เลยครับ|เลยค่ะ|[.!?]))\s+/)
       .map(s => s.trim())
@@ -118,7 +111,7 @@ export class ElevenLabsManager {
     for (const part of rawParts) {
       if (!current) {
         current = part;
-      } else if ((current + ' ' + part).length <= 75) {
+      } else if ((current + ' ' + part).length <= 85) {
         current += ' ' + part;
       } else {
         chunks.push(current);
@@ -129,9 +122,6 @@ export class ElevenLabsManager {
     return chunks;
   }
 
-  /**
-   * Fetches audio Blob for a single chunk (checks client cache first)
-   */
   async fetchChunkBlob(chunkText, signal, myReqId) {
     const cacheKey = `${this.voiceId}:${chunkText}`;
     if (this.audioCache.has(cacheKey)) {
@@ -142,10 +132,10 @@ export class ElevenLabsManager {
     let audioBlob = null;
     let lastErrorDetails = '';
 
-    // 1. Direct ElevenLabs stream call if client key is provided
+    // 1. Direct ElevenLabs API call if client key is provided
     if (this.apiKey && this.apiKey.length > 10) {
       try {
-        const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream?output_format=mp3_22050_32`;
+        const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=mp3_22050_32`;
         const payload = {
           text: chunkText,
           model_id: 'eleven_v3',
@@ -236,9 +226,10 @@ export class ElevenLabsManager {
   }
 
   /**
-   * Plays a single Blob on the shared HTMLAudioElement and resolves when playback ends.
+   * Plays a single Blob on the shared HTMLAudioElement and guarantees resolution
+   * even if mobile browser drops `onended`.
    */
-  playBlob(audioBlob, myReqId, onFirstStart) {
+  playBlob(audioBlob, chunkText, myReqId, onFirstStart) {
     return new Promise((resolve) => {
       if (myReqId !== this.requestId) {
         resolve({ success: true, cancelled: true });
@@ -253,12 +244,40 @@ export class ElevenLabsManager {
       const finish = (result) => {
         if (settled) return;
         settled = true;
+        clearTimeout(this.playbackSafetyTimer);
+        this.playbackSafetyTimer = null;
         if (this.currentResolve === finish) this.currentResolve = null;
         this.isPlaying = false;
+        audio.onloadedmetadata = null;
+        audio.ontimeupdate = null;
+        audio.onplay = null;
+        audio.onended = null;
+        audio.onerror = null;
         URL.revokeObjectURL(audioUrl);
         resolve(result);
       };
       this.currentResolve = finish;
+
+      // Fallback safety timeout based on text length so playback NEVER hangs forever on mobile
+      const estimatedMaxMs = Math.max(4500, Math.min(12000, (chunkText || '').length * 150 + 2500));
+      this.playbackSafetyTimer = setTimeout(() => {
+        finish({ success: true });
+      }, estimatedMaxMs);
+
+      audio.onloadedmetadata = () => {
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+          clearTimeout(this.playbackSafetyTimer);
+          this.playbackSafetyTimer = setTimeout(() => {
+            finish({ success: true });
+          }, Math.ceil(audio.duration * 1000) + 500);
+        }
+      };
+
+      audio.ontimeupdate = () => {
+        if (Number.isFinite(audio.duration) && audio.duration > 0 && audio.currentTime >= audio.duration - 0.08) {
+          finish({ success: true });
+        }
+      };
 
       audio.onplay = () => {
         if (myReqId !== this.requestId) {
@@ -290,10 +309,6 @@ export class ElevenLabsManager {
     });
   }
 
-  /**
-   * Generates and plays audio from ElevenLabs API with sentence pipelining:
-   * Sentence 1 starts playing as soon as it arrives while Sentence 2 fetches in parallel.
-   */
   async speak(text, { onStart = () => {}, onEnd = () => {}, onError = () => {} } = {}) {
     this.stop();
 
@@ -309,8 +324,6 @@ export class ElevenLabsManager {
     this.abortController = controller;
 
     const chunks = this.splitIntoChunks(formattedText);
-
-    // Start prefetching all chunks in parallel immediately so chunk 2 is ready before chunk 1 finishes playing!
     const chunkPromises = chunks.map(chunk => this.fetchChunkBlob(chunk, controller.signal, myReqId));
 
     let started = false;
@@ -324,7 +337,7 @@ export class ElevenLabsManager {
         return { success: false, fallbackNeeded: !started, error: fetched.error, reason: fetched.error || 'ElevenLabs synthesis failed' };
       }
 
-      const playRes = await this.playBlob(fetched.blob, myReqId, () => {
+      const playRes = await this.playBlob(fetched.blob, chunks[i], myReqId, () => {
         if (!started) {
           started = true;
           onStart();
@@ -346,6 +359,8 @@ export class ElevenLabsManager {
 
   stop() {
     this.requestId++;
+    clearTimeout(this.playbackSafetyTimer);
+    this.playbackSafetyTimer = null;
     if (this.abortController) {
       try {
         this.abortController.abort();
@@ -356,6 +371,8 @@ export class ElevenLabsManager {
     }
     if (this.currentAudio) {
       try {
+        this.currentAudio.onloadedmetadata = null;
+        this.currentAudio.ontimeupdate = null;
         this.currentAudio.onplay = null;
         this.currentAudio.onended = null;
         this.currentAudio.onerror = null;

@@ -56,6 +56,7 @@ export default async function handler(req, res) {
       const cachedBuf = ttsCache.get(cacheKey);
       res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
+        'Content-Length': cachedBuf.length,
         'Cache-Control': 'public, max-age=3600'
       });
       res.end(cachedBuf);
@@ -69,9 +70,10 @@ export default async function handler(req, res) {
       voice_settings: { stability: 0.5, similarity_boost: 0.78, style: 0.0, use_speaker_boost: false }
     };
 
-    const streamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}/stream?output_format=mp3_22050_32`;
+    // Standard endpoint with lightweight mp3_22050_32 keeps proper MP3 headers so mobile audio.onended always fires
+    const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}?output_format=mp3_22050_32`;
 
-    let elevenRes = await fetch(streamUrl, {
+    let elevenRes = await fetch(ttsUrl, {
       method: 'POST',
       headers: { 'Accept': 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': apiKey },
       body: JSON.stringify(payload)
@@ -79,7 +81,7 @@ export default async function handler(req, res) {
 
     if (!elevenRes.ok && elevenRes.status === 400) {
       delete payload.language_code;
-      elevenRes = await fetch(streamUrl, {
+      elevenRes = await fetch(ttsUrl, {
         method: 'POST',
         headers: { 'Accept': 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': apiKey },
         body: JSON.stringify(payload)
@@ -106,6 +108,7 @@ export default async function handler(req, res) {
 
     res.writeHead(200, {
       'Content-Type': 'audio/mpeg',
+      'Content-Length': audioBuffer.length,
       'Cache-Control': 'public, max-age=3600'
     });
     res.end(audioBuffer);

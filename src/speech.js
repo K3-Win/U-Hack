@@ -204,19 +204,16 @@ export class SpeechManager {
         setTimeout(() => {
           this.onSpeakEnd();
           resolve();
-        }, 1500);
+        }, 1200);
         return;
       }
 
-      // Stop ongoing speech
       this.stopSpeaking();
 
-      // Re-check voices in case getVoices() wasn't ready on first load
       if (!this.thaiVoice || this.voices.length === 0) {
         this.initVoices();
       }
 
-      // Auto-detect language of the response text (Thai vs English)
       const isThai = /[\u0E00-\u0E7F]/.test(text);
       const selectedVoice = isThai
         ? (this.thaiVoice || this.voices.find(v => v.lang.toLowerCase().startsWith('th')) || null)
@@ -236,11 +233,16 @@ export class SpeechManager {
       const done = () => {
         if (settled) return;
         settled = true;
+        clearTimeout(this.speechSafetyTimer);
+        this.speechSafetyTimer = null;
         if (this.currentUtteranceResolve === done) this.currentUtteranceResolve = null;
         this.onSpeakEnd();
         resolve();
       };
       this.currentUtteranceResolve = done;
+
+      const maxMs = Math.max(3500, Math.min(10000, text.length * 140 + 2000));
+      this.speechSafetyTimer = setTimeout(done, maxMs);
 
       utterance.onstart = () => {
         this.onSpeakStart();
@@ -254,6 +256,8 @@ export class SpeechManager {
   }
 
   stopSpeaking() {
+    clearTimeout(this.speechSafetyTimer);
+    this.speechSafetyTimer = null;
     if (this.synth && (this.synth.speaking || this.synth.pending)) {
       this.synth.cancel();
     }
