@@ -205,14 +205,14 @@ function setAppState(state) {
       btnPtt.classList.add('recording');
       statusBadge.textContent = 'กำลังฟัง...';
       statusBadge.style.color = '#f59e0b';
-      pttHelperText.textContent = 'กำลังฟังเสียงของคุณ... (ปล่อยหรือพูดเสร็จเพื่อส่งคำถาม)';
+      if (pttHelperText) pttHelperText.textContent = 'กำลังฟังเสียงของคุณ...';
       break;
 
     case 'THINKING':
       ubotOrbWrapper.classList.add('thinking');
       statusBadge.textContent = 'กำลังประมวลผล...';
       statusBadge.style.color = '#8b5cf6';
-      pttHelperText.textContent = 'VisionBot กำลังวิเคราะห์ภาพและคำถาม...';
+      if (pttHelperText) pttHelperText.textContent = 'กำลังวิเคราะห์ภาพและคำถาม...';
       break;
 
     case 'SPEAKING':
@@ -220,14 +220,14 @@ function setAppState(state) {
       soundwaveBar.classList.add('active');
       statusBadge.textContent = 'กำลังตอบ...';
       statusBadge.style.color = '#00f2fe';
-      pttHelperText.textContent = 'VisionBot กำลังพูดตอบกลับ...';
+      if (pttHelperText) pttHelperText.textContent = 'กำลังพูดตอบกลับ...';
       break;
 
     case 'IDLE':
     default:
       statusBadge.textContent = 'พร้อมรับคำสั่ง';
       statusBadge.style.color = '#10b981';
-      pttHelperText.textContent = '[กดปุ่มไมค์เพื่อจับภาพมุมมองและพูดถาม VisionBot]';
+      if (pttHelperText) pttHelperText.textContent = '';
       break;
   }
 }
@@ -422,11 +422,11 @@ function toggleAppLanguage(forcedLang) {
   }
 
   if (currentAppLang === 'en-US') {
-    pttHelperText.textContent = '[Press mic to talk | Double-tap screen for Walk Mode]';
+    if (pttHelperText) pttHelperText.textContent = '';
     if (walkModeLabel) walkModeLabel.textContent = isWalkingMode ? 'WALK: ON' : 'WALK: OFF';
     speakAnswer('Switched to English. VisionBot is ready.');
   } else {
-    pttHelperText.textContent = 'แตะไมค์เพื่อถามสิ่งของตรงหน้า • แตะจอ 2 ครั้งเพื่อเปิด/ปิดโหมดเดิน';
+    if (pttHelperText) pttHelperText.textContent = '';
     if (walkModeLabel) walkModeLabel.textContent = isWalkingMode ? 'โหมดเดิน: เปิด' : 'โหมดเดิน: ปิด';
     speakAnswer('เปลี่ยนเป็นภาษาไทยแล้วครับ วิชั่นบอทพร้อมรับคำสั่ง');
   }
@@ -699,8 +699,9 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Quick Action Chips (Instant 1-Click with live snapshot)
+// Quick Action Chips (optional if present in DOM)
 function setupQuickChip(btn, question) {
+  if (!btn) return;
   btn.addEventListener('click', () => {
     captureFrameSnapshot();
     handleUserQuerySubmit(question);
