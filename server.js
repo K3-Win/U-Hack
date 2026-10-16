@@ -537,7 +537,7 @@ async function handleMcp(req, res) {
   }
 }
 
-const server = http.createServer((req, res) => {
+function appHandler(req, res) {
   // CORS Preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -608,26 +608,34 @@ const server = http.createServer((req, res) => {
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
   });
-});
+}
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Error: Port ${PORT} is in use by an existing process.`);
-    console.error(`👉 To free port ${PORT}, run this in PowerShell:`);
-    console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force\n`);
-    process.exit(1);
-  } else {
-    console.error('Server error:', err);
-  }
-});
+// Export handler for Vercel Serverless Function
+export default appHandler;
 
-// Auto-cleanup any hung process on port 5173 before binding
-freePortIfBusy(PORT);
+// Standalone server for local development or Docker/Render
+if (!process.env.VERCEL) {
+  const server = http.createServer(appHandler);
 
-server.listen(PORT, () => {
-  console.log(`\n🚀 U-Vision (VisionBot) Server is running at: http://localhost:${PORT}`);
-  console.log(`📡 Ready for Camera, Microphone & AI Vision interaction.`);
-  console.log(`🔑 Gemini Server Proxy: ${GEMINI_API_KEY ? 'Active (Ready)' : 'No server key (Client fallback)'}`);
-  // Asynchronously discover and prepare top authentic Thai voice
-  autoDiscoverThaiVoice();
-});
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n❌ Error: Port ${PORT} is in use by an existing process.`);
+      console.error(`👉 To free port ${PORT}, run this in PowerShell:`);
+      console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force\n`);
+      process.exit(1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+
+  // Auto-cleanup any hung process on port 5173 before binding
+  freePortIfBusy(PORT);
+
+  server.listen(PORT, () => {
+    console.log(`\n🚀 U-Vision (VisionBot) Server is running at: http://localhost:${PORT}`);
+    console.log(`📡 Ready for Camera, Microphone & AI Vision interaction.`);
+    console.log(`🔑 Gemini Server Proxy: ${GEMINI_API_KEY ? 'Active (Ready)' : 'No server key (Client fallback)'}`);
+    autoDiscoverThaiVoice();
+  });
+}
+
