@@ -2,6 +2,10 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || process.env.elevenl
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'H9eYlNHpm1vah6PPgYAk';
 const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_v3';
 
+// Warm in-memory LRU cache on serverless instance for repeated phrases
+const ttsCache = new Map();
+const MAX_CACHE_ENTRIES = 60;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let bodyStr = '';
@@ -46,15 +50,28 @@ export default async function handler(req, res) {
 
     const isThai = /[\u0E00-\u0E7F]/.test(text);
     const effectiveVoiceId = (body.voiceId || '').trim() || DEFAULT_VOICE_ID;
+    const cacheKey = `${effectiveVoiceId}:${text}`;
+
+    if (ttsCache.has(cacheKey)) {
+      const cachedBuf = ttsCache.get(cacheKey);
+      res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Cache-Control': 'public, max-age=3600'
+      });
+      res.end(cachedBuf);
+      return;
+    }
 
     const payload = {
       text,
       model_id: DEFAULT_TTS_MODEL,
       ...(isThai ? { language_code: 'th' } : {}),
-      voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true }
+      voice_settings: { stability: 0.5, similarity_boost: 0.78, style: 0.0, use_speaker_boost: false }
     };
 
-    let elevenRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}`, {
+    const streamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}/stream?output_format=mp3_22050_32`;
+
+    let elevenRes = await fetch(streamUrl, {
       method: 'POST',
       headers: { 'Accept': 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': apiKey },
       body: JSON.stringify(payload)
@@ -62,7 +79,7 @@ export default async function handler(req, res) {
 
     if (!elevenRes.ok && elevenRes.status === 400) {
       delete payload.language_code;
-      elevenRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${effectiveVoiceId}`, {
+      elevenRes = await fetch(streamUrl, {
         method: 'POST',
         headers: { 'Accept': 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': apiKey },
         body: JSON.stringify(payload)
@@ -77,8 +94,21 @@ export default async function handler(req, res) {
     }
 
     const arrayBuffer = await elevenRes.arrayBuffer();
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg' });
-    res.end(Buffer.from(arrayBuffer));
+    const audioBuffer = Buffer.from(arrayBuffer);
+
+    if (text.length <= 160) {
+      if (ttsCache.size >= MAX_CACHE_ENTRIES) {
+        const firstKey = ttsCache.keys().next().value;
+        ttsCache.delete(firstKey);
+      }
+      ttsCache.set(cacheKey, audioBuffer);
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'public, max-age=3600'
+    });
+    res.end(audioBuffer);
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ error: err.message }));

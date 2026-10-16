@@ -87,10 +87,10 @@ export class CameraManager {
   }
 
   /**
-   * Captures the current frame. Defaults to maxDimension = 1280 and JPEG quality 0.80
-   * so mobile 4K cameras stay well under Vercel Serverless 4.5MB request limits and upload fast.
+   * Captures the current frame. Defaults to maxDimension = 768 and JPEG quality 0.74
+   * (~45-65KB) so mobile camera snapshots upload almost instantly over Wi-Fi/4G/5G.
    */
-  captureFrame(maxDimension = 1280) {
+  captureFrame(maxDimension = 768, quality = 0.74) {
     const ctx = this.canvas.getContext('2d');
     let sourceWidth, sourceHeight;
 
@@ -105,7 +105,7 @@ export class CameraManager {
     let targetWidth = sourceWidth;
     let targetHeight = sourceHeight;
 
-    const maxDim = maxDimension > 0 ? maxDimension : 1280;
+    const maxDim = maxDimension > 0 ? maxDimension : 768;
     if (targetWidth > maxDim || targetHeight > maxDim) {
       if (targetWidth > targetHeight) {
         targetHeight = Math.round((targetHeight * maxDim) / targetWidth);
@@ -125,8 +125,7 @@ export class CameraManager {
       ctx.drawImage(this.video, 0, 0, targetWidth, targetHeight);
     }
 
-    // In-memory JPEG, quality 0.82 (~150-250KB, fast over 4G/5G/WiFi and safe for Vercel Serverless)
-    const dataUrl = this.canvas.toDataURL('image/jpeg', 0.82);
+    const dataUrl = this.canvas.toDataURL('image/jpeg', quality);
     const base64Data = dataUrl.split(',')[1];
 
     return {

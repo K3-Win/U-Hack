@@ -19,8 +19,8 @@ export class AIService {
       utopiaEndpoint: localStorage.getItem('uvision_utopia_endpoint') || '',
       utopiaToken: localStorage.getItem('uvision_utopia_token') || '',
       geminiKey: localStorage.getItem('uvision_gemini_key') || '',
-      geminiModel: (!localStorage.getItem('uvision_gemini_model') || localStorage.getItem('uvision_gemini_model').includes('2.5') || localStorage.getItem('uvision_gemini_model') === 'gemini-3.5-flash')
-        ? 'gemini-3.1-flash-lite' 
+      geminiModel: (!localStorage.getItem('uvision_gemini_model') || localStorage.getItem('uvision_gemini_model').includes('2.5') || localStorage.getItem('uvision_gemini_model').includes('3.1') || localStorage.getItem('uvision_gemini_model') === 'gemini-3.5-flash')
+        ? 'gemini-3.5-flash-lite' 
         : localStorage.getItem('uvision_gemini_model')
     };
   }
@@ -226,11 +226,12 @@ export class AIService {
         }
       ],
       generationConfig: {
-        maxOutputTokens: 1024,
-        temperature: 0.4,
-        thinkingConfig: {
-          thinkingBudget: 0
-        }
+        maxOutputTokens: 250,
+        temperature: 0.3,
+        mediaResolution: 'MEDIA_RESOLUTION_MEDIUM',
+        thinkingConfig: /gemini-3\.[5-9]|gemini-3-flash/i.test(model)
+          ? { thinkingLevel: 'MINIMAL' }
+          : { thinkingBudget: 0 }
       }
     };
 

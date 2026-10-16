@@ -1,39 +1,36 @@
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.gemini || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 
-const DEFAULT_SYSTEM_INSTRUCTION = `You are VisionBot, a friendly and empathetic AI companion integrated into smart eyewear for a visually impaired user. You receive a first-person camera snapshot synchronized with the user's spoken voice query.
-CORE OPERATIONAL RULES:
-1. SPEECH-ONLY FORMAT:
-   - Your response is fed directly into TTS.
-   - Output purely plain, spoken text.
-   - NEVER use markdown, asterisks, bullet points, numbered lists, hashtags, emojis, or code snippets.
-2. DYNAMIC LANGUAGE & TONE:
-   - Always respond in the exact language the user used to speak to you (match Thai with natural spoken Thai, English with English).
-   - Sound like a warm, supportive, and dependable companion—natural, conversational, and clear.
-   - Keep answers between 2 to 3 concise, informative sentences.
-3. DETAILED OBJECT & SCENE IDENTIFICATION:
-   - Clearly identify what is in front of the user, including brand names, colors, text on labels, object state, and practical details.
-   - Ground positions using clock-face directions or left/right/center and approximate distance (e.g., "ตรงหน้าคุณระยะ 1 เมตรคือ...", "ด้านซ้ายที่ 10 นาฬิกามี...").
-4. SAFETY FIRST:
-   - If an immediate hazard is visible in the frame, warn the user first before answering their question.
-`;
+const DEFAULT_SYSTEM_INSTRUCTION = `You are VisionBot, a fast, friendly AI assistant for a visually impaired user. You receive a camera snapshot and the user's question.
+RULES:
+1. Plain spoken text ONLY (fed directly to TTS). No markdown, no bullets, no emojis.
+2. Respond in natural spoken Thai (unless asked in English).
+3. Be concise and direct: 1 to 2 short sentences maximum (< 35 words total) so TTS audio plays quickly.
+4. Clearly state what is in front of the user, its color/details/text, and position (e.g. "ตรงหน้าคุณคือ...", "ด้านซ้ายมี...").`;
 
-const WALKING_SYSTEM_INSTRUCTION = `You are VisionBot, an expert real-time visual navigation guide for a visually impaired user walking indoors or around a room.
-STRICT NAVIGATION DIRECTIVES:
-1. GROUND PLANE & OBSTACLE AVOIDANCE:
-   - Carefully inspect the floor and immediate path in front of the user (0.5 to 3 meters).
-   - If the path ahead is clear: "ทางตรงหน้าโล่ง เดินตรงไปได้ [2-3] ก้าวครับ"
-   - If there is an obstacle (chair, table, bag, person, cords, door frame): name the obstacle and tell the user which way to sidestep or turn, e.g. "มี[เก้าอี้/โต๊ะ]ขวางข้างหน้า ให้เบี่ยงซ้าย 1 ก้าวแล้วเดินต่อครับ"
-   - If approaching a wall, corner, or dead-end: tell them to turn to follow the open room space, e.g. "ข้างหน้าใกล้กำแพง ให้หันขวาประมาณ 90 องศาเพื่อเดินต่อครับ"
-2. MISSION COMPLETION:
-   - Only say "ถึงเป้าหมายเรียบร้อยแล้วครับ ภารกิจเสร็จสิ้น" if the user had a specific target (like a door or table) AND is now right in front of it within arm's reach. For continuous room walking ("เดินตรงไปข้างหน้าอย่างปลอดภัย" or "เดินรอบห้อง"), keep guiding them around corners and obstacles without ending prematurely.
-3. CONCISENESS:
-   - Output EXACTLY 1 short, natural spoken sentence (< 15 words in Thai). Plain spoken text only, no markdown.
-`;
+const WALKING_SYSTEM_INSTRUCTION = `You are VisionBot, a real-time indoor/outdoor walking guide for a visually impaired user.
+RULES:
+1. Inspect the floor path 0.5 to 3 meters ahead.
+2. Path clear: "ทางตรงหน้าโล่ง เดินตรงไปได้ 2 ก้าวครับ"
+3. Obstacle ahead (chair, table, person, bag, door frame): name it and give direction, e.g. "มีเก้าอี้ขวางข้างหน้า ให้เบี่ยงซ้าย 1 ก้าวครับ"
+4. Wall or corner ahead: tell which way to turn, e.g. "ข้างหน้าใกล้กำแพง ให้หันขวาเพื่อเดินต่อครับ"
+5. Output EXACTLY 1 short sentence (< 12 words in Thai). Plain spoken text only.`;
+
+function buildGenerationConfig(modelName, isWalking) {
+  const isGemini35OrNewer = /gemini-3\.[5-9]|gemini-3-flash/i.test(modelName);
+  return {
+    maxOutputTokens: isWalking ? 70 : 220,
+    temperature: isWalking ? 0.15 : 0.3,
+    mediaResolution: isWalking ? 'MEDIA_RESOLUTION_LOW' : 'MEDIA_RESOLUTION_MEDIUM',
+    thinkingConfig: isGemini35OrNewer
+      ? { thinkingLevel: 'MINIMAL' }
+      : { thinkingBudget: 0 }
+  };
+}
 
 async function callGemini({ question, imageBase64, mimeType = 'image/jpeg', apiKey, model, mode, detections }) {
   const key = apiKey || GEMINI_API_KEY;
-  const useModel = model || GEMINI_MODEL;
+  const requestedModel = (model && !model.includes('3.1') && !model.includes('2.5')) ? model : GEMINI_MODEL;
   if (!key) {
     const e = new Error('GEMINI_API_KEY is not configured on server.');
     e.status = 500;
@@ -50,21 +47,19 @@ async function callGemini({ question, imageBase64, mimeType = 'image/jpeg', apiK
   const isWalking = mode === 'walking';
   const systemText = isWalking ? WALKING_SYSTEM_INSTRUCTION : DEFAULT_SYSTEM_INSTRUCTION;
 
-  const geminiPayload = {
-    systemInstruction: { parts: [{ text: systemText }] },
-    contents: [{ role: 'user', parts }],
-    generationConfig: {
-      maxOutputTokens: isWalking ? 150 : 1024,
-      temperature: isWalking ? 0.2 : 0.4,
-      thinkingConfig: { thinkingBudget: 0 }
-    }
-  };
+  const fallbackModels = [requestedModel, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite']
+    .filter((m, i, a) => Boolean(m) && a.indexOf(m) === i);
 
-  const fallbackModels = [useModel, 'gemini-2.5-flash', 'gemini-2.0-flash'].filter((m, i, a) => a.indexOf(m) === i);
   let lastStatus = 500;
   let lastErrText = '';
 
   for (const candidateModel of fallbackModels) {
+    const geminiPayload = {
+      systemInstruction: { parts: [{ text: systemText }] },
+      contents: [{ role: 'user', parts }],
+      generationConfig: buildGenerationConfig(candidateModel, isWalking)
+    };
+
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${key}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -80,7 +75,7 @@ async function callGemini({ question, imageBase64, mimeType = 'image/jpeg', apiK
 
     lastStatus = response.status;
     lastErrText = await response.text();
-    if (lastStatus !== 503 && lastStatus !== 429 && lastStatus !== 404) break;
+    if (lastStatus !== 503 && lastStatus !== 429 && lastStatus !== 404 && lastStatus !== 400) break;
   }
 
   const e = new Error(`Gemini API Error ${lastStatus}`);

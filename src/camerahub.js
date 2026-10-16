@@ -27,9 +27,14 @@ export class CameraHub {
     return this.camera.isUsingCustomImage || (this.video.readyState >= 2 && this.video.videoWidth > 0);
   }
 
-  /** Full native-resolution JPEG (no downscale, in memory only). */
+  /** Fast 768px JPEG for detailed Q&A */
   getNativeSnapshot() {
-    return this.camera.captureFrame(0);
+    return this.camera.captureFrame(768, 0.74);
+  }
+
+  /** Ultra-fast 512px JPEG (~25KB) for low-latency Walk Mode navigation */
+  getWalkingSnapshot() {
+    return this.camera.captureFrame(512, 0.68);
   }
 
   setDetections(list) {

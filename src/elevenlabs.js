@@ -1,5 +1,5 @@
 /**
- * ElevenLabs Text-to-Speech (TTS) Integration with Smart Fallback
+ * ElevenLabs Text-to-Speech (TTS) Integration with Fast Streaming, Caching & Sentence Pipelining
  */
 
 export class ElevenLabsManager {
@@ -12,22 +12,21 @@ export class ElevenLabsManager {
       this.currentAudio.preload = 'auto';
     }
     this.audioUnlocked = false;
-    this.available = null; // null = unchecked, true = usable, false = unusable
+    this.available = null;
     this.isPlaying = false;
     this.serverConfigured = false;
     this.requestId = 0;
     this.abortController = null;
     this.currentResolve = null;
+    this.audioCache = new Map(); // key: `${voiceId}:${text}` -> Blob
   }
 
   /**
    * Unlocks HTMLAudioElement on mobile browsers (iOS Safari / Android Chrome)
-   * Must be called synchronously inside a user tap/click handler.
    */
   unlockAudio() {
     if (this.audioUnlocked || !this.currentAudio) return;
     try {
-      // Tiny silent WAV data URI to prime the audio element on mobile user gesture
       this.currentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
       const p = this.currentAudio.play();
       if (p && typeof p.then === 'function') {
@@ -52,14 +51,10 @@ export class ElevenLabsManager {
     return Boolean((this.apiKey && this.apiKey.length > 10) || this.serverConfigured) && Boolean(this.voiceId);
   }
 
-  /** Configured AND not known to be broken. Use this to choose ElevenLabs vs browser TTS. */
   isUsable() {
     return this.isConfigured() && this.available !== false;
   }
 
-  /**
-   * Startup probe (no characters consumed). Checks server /api/config first, or direct API if client key exists.
-   */
   async checkAvailability() {
     try {
       const cfgRes = await fetch('/api/config');
@@ -72,7 +67,7 @@ export class ElevenLabsManager {
         }
       }
     } catch (e) {
-      // Server not reachable, try client key if provided
+      // Server not reachable
     }
 
     if (!this.apiKey || this.apiKey.length <= 10) {
@@ -103,42 +98,59 @@ export class ElevenLabsManager {
   }
 
   /**
-   * Generates and plays audio from ElevenLabs API (via secure server proxy or direct client key).
-   * Resolves ONLY when playback has finished (or was cancelled/failed) so callers never overlap speech.
-   * @param {string} text - Text to synthesize
-   * @param {object} callbacks - { onStart, onEnd, onError }
-   * @returns {Promise<{ success: boolean, cancelled?: boolean, fallbackNeeded: boolean }>}
+   * Splits longer responses into short speakable chunks so Sentence 1 starts playing almost immediately
+   * while Sentence 2 is synthesized in parallel in the background.
    */
-  async speak(text, { onStart = () => {}, onEnd = () => {}, onError = () => {} } = {}) {
-    this.stop();
+  splitIntoChunks(text) {
+    const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+    if (cleaned.length <= 75) return [cleaned];
 
-    if (!this.isUsable()) {
-      return { success: false, fallbackNeeded: true, reason: 'ElevenLabs ไม่พร้อมใช้งาน' };
+    // Split on Thai polite particles followed by space, or standard sentence punctuation
+    const rawParts = cleaned
+      .split(/(?<=(?:ครับ|ค่ะ|นะคะ|นะครับ|เลยครับ|เลยค่ะ|[.!?]))\s+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    if (rawParts.length <= 1) return [cleaned];
+
+    const chunks = [];
+    let current = '';
+    for (const part of rawParts) {
+      if (!current) {
+        current = part;
+      } else if ((current + ' ' + part).length <= 75) {
+        current += ' ' + part;
+      } else {
+        chunks.push(current);
+        current = part;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  }
+
+  /**
+   * Fetches audio Blob for a single chunk (checks client cache first)
+   */
+  async fetchChunkBlob(chunkText, signal, myReqId) {
+    const cacheKey = `${this.voiceId}:${chunkText}`;
+    if (this.audioCache.has(cacheKey)) {
+      return { blob: this.audioCache.get(cacheKey) };
     }
 
-    const myReqId = ++this.requestId;
-    const controller = new AbortController();
-    this.abortController = controller;
-
+    const isThai = /[\u0E00-\u0E7F]/.test(chunkText);
     let audioBlob = null;
     let lastErrorDetails = '';
-    const formattedText = (text || '').trim();
-    const isThai = /[\u0E00-\u0E7F]/.test(formattedText);
 
-    // 1. Try Direct ElevenLabs API only if user explicitly entered a client-side API key
+    // 1. Direct ElevenLabs stream call if client key is provided
     if (this.apiKey && this.apiKey.length > 10) {
       try {
-        const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`;
+        const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream?output_format=mp3_22050_32`;
         const payload = {
-          text: formattedText,
+          text: chunkText,
           model_id: 'eleven_v3',
           ...(isThai ? { language_code: 'th' } : {}),
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.8,
-            style: 0.0,
-            use_speaker_boost: true
-          }
+          voice_settings: { stability: 0.5, similarity_boost: 0.78, style: 0.0, use_speaker_boost: false }
         };
 
         let response = await fetch(url, {
@@ -149,12 +161,10 @@ export class ElevenLabsManager {
             'xi-api-key': this.apiKey
           },
           body: JSON.stringify(payload),
-          signal: controller.signal
+          signal
         });
 
-        if (myReqId !== this.requestId) {
-          return { success: true, cancelled: true, fallbackNeeded: false };
-        }
+        if (myReqId !== this.requestId) return { cancelled: true };
 
         if (!response.ok && response.status === 400) {
           delete payload.language_code;
@@ -166,44 +176,39 @@ export class ElevenLabsManager {
               'xi-api-key': this.apiKey
             },
             body: JSON.stringify(payload),
-            signal: controller.signal
+            signal
           });
         }
 
-        if (myReqId !== this.requestId) {
-          return { success: true, cancelled: true, fallbackNeeded: false };
-        }
+        if (myReqId !== this.requestId) return { cancelled: true };
 
         if (response.ok) {
           audioBlob = await response.blob();
         } else {
-          const errBody = await response.text();
-          lastErrorDetails = `Direct API Status ${response.status}: ${errBody}`;
+          lastErrorDetails = `Direct API Status ${response.status}`;
         }
       } catch (err) {
         if (err.name === 'AbortError' || myReqId !== this.requestId) {
-          return { success: true, cancelled: true, fallbackNeeded: false };
+          return { cancelled: true };
         }
       }
     }
 
-    // 2. Use Server Proxy (/api/tts) which securely uses process.env.ELEVENLABS_API_KEY
+    // 2. Server Proxy (/api/tts)
     if (!audioBlob && myReqId === this.requestId) {
       try {
         const proxyRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            text: formattedText,
+            text: chunkText,
             voiceId: this.voiceId,
             apiKey: this.apiKey || undefined
           }),
-          signal: controller.signal
+          signal
         });
 
-        if (myReqId !== this.requestId) {
-          return { success: true, cancelled: true, fallbackNeeded: false };
-        }
+        if (myReqId !== this.requestId) return { cancelled: true };
 
         if (proxyRes.ok) {
           audioBlob = await proxyRes.blob();
@@ -213,23 +218,30 @@ export class ElevenLabsManager {
         }
       } catch (proxyErr) {
         if (proxyErr.name === 'AbortError' || myReqId !== this.requestId) {
-          return { success: true, cancelled: true, fallbackNeeded: false };
+          return { cancelled: true };
         }
-        lastErrorDetails = `Connection failed: ${proxyErr.message}`;
+        lastErrorDetails = proxyErr.message;
       }
     }
 
-    if (myReqId !== this.requestId) {
-      return { success: true, cancelled: true, fallbackNeeded: false };
+    if (audioBlob && chunkText.length <= 160) {
+      if (this.audioCache.size >= 50) {
+        const firstKey = this.audioCache.keys().next().value;
+        this.audioCache.delete(firstKey);
+      }
+      this.audioCache.set(cacheKey, audioBlob);
     }
 
-    if (!audioBlob) {
-      return { success: false, fallbackNeeded: true, error: lastErrorDetails, reason: lastErrorDetails || 'ElevenLabs synthesis failed' };
-    }
+    return { blob: audioBlob, error: lastErrorDetails };
+  }
 
+  /**
+   * Plays a single Blob on the shared HTMLAudioElement and resolves when playback ends.
+   */
+  playBlob(audioBlob, myReqId, onFirstStart) {
     return new Promise((resolve) => {
       if (myReqId !== this.requestId) {
-        resolve({ success: true, cancelled: true, fallbackNeeded: false });
+        resolve({ success: true, cancelled: true });
         return;
       }
 
@@ -251,34 +263,85 @@ export class ElevenLabsManager {
       audio.onplay = () => {
         if (myReqId !== this.requestId) {
           audio.pause();
-          finish({ success: true, cancelled: true, fallbackNeeded: false });
+          finish({ success: true, cancelled: true });
           return;
         }
         this.isPlaying = true;
         this.audioUnlocked = true;
-        onStart();
+        if (onFirstStart) onFirstStart();
       };
 
       audio.onended = () => {
-        onEnd();
-        finish({ success: true, fallbackNeeded: false });
+        finish({ success: true });
       };
 
-      audio.onerror = (e) => {
-        onError(e);
-        finish({ success: false, fallbackNeeded: true, reason: 'Audio decode error' });
+      audio.onerror = () => {
+        finish({ success: false, reason: 'Audio decode error' });
       };
 
       audio.src = audioUrl;
-      audio.load();
       audio.play().catch((err) => {
         if (myReqId !== this.requestId || err.name === 'AbortError') {
-          finish({ success: true, cancelled: true, fallbackNeeded: false });
+          finish({ success: true, cancelled: true });
         } else {
-          finish({ success: false, fallbackNeeded: true, reason: err.message });
+          finish({ success: false, reason: err.message });
         }
       });
     });
+  }
+
+  /**
+   * Generates and plays audio from ElevenLabs API with sentence pipelining:
+   * Sentence 1 starts playing as soon as it arrives while Sentence 2 fetches in parallel.
+   */
+  async speak(text, { onStart = () => {}, onEnd = () => {}, onError = () => {} } = {}) {
+    this.stop();
+
+    if (!this.isUsable()) {
+      return { success: false, fallbackNeeded: true, reason: 'ElevenLabs ไม่พร้อมใช้งาน' };
+    }
+
+    const formattedText = (text || '').trim();
+    if (!formattedText) return { success: true, fallbackNeeded: false };
+
+    const myReqId = ++this.requestId;
+    const controller = new AbortController();
+    this.abortController = controller;
+
+    const chunks = this.splitIntoChunks(formattedText);
+
+    // Start prefetching all chunks in parallel immediately so chunk 2 is ready before chunk 1 finishes playing!
+    const chunkPromises = chunks.map(chunk => this.fetchChunkBlob(chunk, controller.signal, myReqId));
+
+    let started = false;
+    for (let i = 0; i < chunkPromises.length; i++) {
+      const fetched = await chunkPromises[i];
+      if (myReqId !== this.requestId || fetched.cancelled) {
+        return { success: true, cancelled: true, fallbackNeeded: false };
+      }
+      if (!fetched.blob) {
+        onError(fetched.error);
+        return { success: false, fallbackNeeded: !started, error: fetched.error, reason: fetched.error || 'ElevenLabs synthesis failed' };
+      }
+
+      const playRes = await this.playBlob(fetched.blob, myReqId, () => {
+        if (!started) {
+          started = true;
+          onStart();
+        }
+      });
+
+      if (myReqId !== this.requestId || playRes.cancelled) {
+        return { success: true, cancelled: true, fallbackNeeded: false };
+      }
+      if (!playRes.success) {
+        onError(playRes.reason);
+        return { success: false, fallbackNeeded: !started, reason: playRes.reason };
+      }
+    }
+
+    onEnd();
+    return { success: true, fallbackNeeded: false };
   }
 
   stop() {

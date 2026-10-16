@@ -27,7 +27,7 @@ loadEnv();
 
 const PORT = process.env.PORT || 5173;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'H9eYlNHpm1vah6PPgYAk';
 const DEFAULT_TTS_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_v3';
@@ -214,21 +214,23 @@ async function callGemini({ question, imageBase64, mimeType = 'image/jpeg', apiK
   const isWalking = mode === 'walking';
   const systemText = isWalking ? WALKING_SYSTEM_INSTRUCTION : DEFAULT_SYSTEM_INSTRUCTION;
 
-  const geminiPayload = {
-    systemInstruction: { parts: [{ text: systemText }] },
-    contents: [{ role: 'user', parts }],
-    generationConfig: {
-      maxOutputTokens: isWalking ? 150 : 1024,
-      temperature: isWalking ? 0.2 : 0.4,
-      thinkingConfig: { thinkingBudget: 0 }
-    }
-  };
-
-  const fallbackModels = [useModel, 'gemini-2.5-flash', 'gemini-2.0-flash'].filter((m, i, a) => a.indexOf(m) === i);
+  const fallbackModels = [useModel, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'].filter((m, i, a) => Boolean(m) && a.indexOf(m) === i);
   let lastStatus = 500;
   let lastErrText = '';
 
   for (const candidateModel of fallbackModels) {
+    const isGemini35OrNewer = /gemini-3\.[5-9]|gemini-3-flash/i.test(candidateModel);
+    const geminiPayload = {
+      systemInstruction: { parts: [{ text: systemText }] },
+      contents: [{ role: 'user', parts }],
+      generationConfig: {
+        maxOutputTokens: isWalking ? 70 : 220,
+        temperature: isWalking ? 0.15 : 0.3,
+        mediaResolution: isWalking ? 'MEDIA_RESOLUTION_LOW' : 'MEDIA_RESOLUTION_MEDIUM',
+        thinkingConfig: isGemini35OrNewer ? { thinkingLevel: 'MINIMAL' } : { thinkingBudget: 0 }
+      }
+    };
+
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${key}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -246,7 +248,7 @@ async function callGemini({ question, imageBase64, mimeType = 'image/jpeg', apiK
     lastErrText = await response.text();
     console.warn(`Gemini API (${candidateModel}) status ${lastStatus}, trying next fallback if transient...`);
 
-    if (lastStatus !== 503 && lastStatus !== 429 && lastStatus !== 404) {
+    if (lastStatus !== 503 && lastStatus !== 429 && lastStatus !== 404 && lastStatus !== 400) {
       break;
     }
   }
