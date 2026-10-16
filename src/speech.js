@@ -198,55 +198,70 @@ export class SpeechManager {
   }
 
   speak(text, { rate = 1.0, pitch = 1.0 } = {}) {
-    if (!this.synth || !text) {
-      this.onSpeakStart();
-      setTimeout(() => this.onSpeakEnd(), 2000);
-      return;
-    }
+    return new Promise((resolve) => {
+      if (!this.synth || !text) {
+        this.onSpeakStart();
+        setTimeout(() => {
+          this.onSpeakEnd();
+          resolve();
+        }, 1500);
+        return;
+      }
 
-    // Stop ongoing speech
-    this.stopSpeaking();
+      // Stop ongoing speech
+      this.stopSpeaking();
 
-    // Re-check voices in case getVoices() wasn't ready on first load
-    if (!this.thaiVoice || this.voices.length === 0) {
-      this.initVoices();
-    }
+      // Re-check voices in case getVoices() wasn't ready on first load
+      if (!this.thaiVoice || this.voices.length === 0) {
+        this.initVoices();
+      }
 
-    // Auto-detect language of the response text (Thai vs English)
-    const isThai = /[\u0E00-\u0E7F]/.test(text);
-    const selectedVoice = isThai
-      ? (this.thaiVoice || this.voices.find(v => v.lang.toLowerCase().startsWith('th')) || null)
-      : (this.englishVoice || this.thaiVoice || this.voices[0] || null);
+      // Auto-detect language of the response text (Thai vs English)
+      const isThai = /[\u0E00-\u0E7F]/.test(text);
+      const selectedVoice = isThai
+        ? (this.thaiVoice || this.voices.find(v => v.lang.toLowerCase().startsWith('th')) || null)
+        : (this.englishVoice || this.thaiVoice || this.voices[0] || null);
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang;
-    } else {
-      utterance.lang = isThai ? 'th-TH' : 'en-US';
-    }
-    utterance.rate = rate;
-    utterance.pitch = pitch;
+      const utterance = new SpeechSynthesisUtterance(text);
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+        utterance.lang = selectedVoice.lang;
+      } else {
+        utterance.lang = isThai ? 'th-TH' : 'en-US';
+      }
+      utterance.rate = rate;
+      utterance.pitch = pitch;
 
-    utterance.onstart = () => {
-      this.onSpeakStart();
-    };
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        if (this.currentUtteranceResolve === done) this.currentUtteranceResolve = null;
+        this.onSpeakEnd();
+        resolve();
+      };
+      this.currentUtteranceResolve = done;
 
-    utterance.onend = () => {
-      this.onSpeakEnd();
-    };
+      utterance.onstart = () => {
+        this.onSpeakStart();
+      };
 
-    utterance.onerror = (e) => {
-      console.warn('SpeechSynthesis error:', e);
-      this.onSpeakEnd();
-    };
+      utterance.onend = done;
+      utterance.onerror = done;
 
-    this.synth.speak(utterance);
+      this.synth.speak(utterance);
+    });
   }
 
   stopSpeaking() {
-    if (this.synth && this.synth.speaking) {
+    if (this.synth && (this.synth.speaking || this.synth.pending)) {
       this.synth.cancel();
+    }
+    if (this.currentUtteranceResolve) {
+      const fn = this.currentUtteranceResolve;
+      this.currentUtteranceResolve = null;
+      fn();
+    } else {
       this.onSpeakEnd();
     }
   }

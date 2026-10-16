@@ -266,11 +266,14 @@ async function handleUserQuerySubmit(questionText) {
     missionPromptTimer = null;
     currentNavigationMission = trimmed;
     const isEn = currentAppLang === 'en-US';
-    const ack = isEn ? `Mission set: ${currentNavigationMission}. Starting guide...` : `รับทราบครับ กำลังพานำทาง${currentNavigationMission}...`;
+    const ack = isEn ? `Mission set: ${currentNavigationMission}. Starting guide.` : `รับทราบครับ กำลังพานำทาง${currentNavigationMission}`;
     ubotResponseText.textContent = ack;
     statusBadge.textContent = isEn ? `🚶‍♂️ ${currentNavigationMission}` : `🚶‍♂️ ${currentNavigationMission}`;
     await speakAnswer(ack);
-    setTimeout(runWalkingGuideStep, 1000);
+    if (isWalkingMode) {
+      clearTimeout(walkingLoopTimer);
+      walkingLoopTimer = setTimeout(runWalkingGuideStep, 1200);
+    }
     return;
   }
 
@@ -284,6 +287,11 @@ async function handleUserQuerySubmit(questionText) {
   if (!currentCapturedFrame) {
     captureFrameSnapshot();
   }
+
+  // Pause Walk Mode loop while answering the user's explicit question, then resume afterwards
+  const pauseWalkSessionId = ++walkingSessionId;
+  clearTimeout(walkingLoopTimer);
+  walkingLoopTimer = null;
 
   setAppState('THINKING');
   playThinkingSound();
@@ -311,59 +319,73 @@ async function handleUserQuerySubmit(questionText) {
     console.error('Failed to get answer:', err);
     setAppState('IDLE');
     ubotResponseText.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง';
+  } finally {
+    // Clear captured frame so next query always takes a fresh snapshot
+    currentCapturedFrame = null;
+    // If user was in Walk Mode, resume guiding after 2.5s
+    if (isWalkingMode && !isAwaitingMissionGoal && pauseWalkSessionId === walkingSessionId) {
+      statusBadge.textContent = `🚶‍♂️ ${currentNavigationMission || 'กำลังนำทาง'}`;
+      clearTimeout(walkingLoopTimer);
+      walkingLoopTimer = setTimeout(runWalkingGuideStep, 2500);
+    }
   }
 }
 
-// Audio playback: Transparently routes to chosen engine
+// Audio playback: Strictly serialized so two voices NEVER play at the same time
+let activeSpeechId = 0;
+
 async function speakAnswer(text) {
+  if (!text) return;
+
+  // Cancel any previous ongoing speech (both Browser TTS and ElevenLabs) immediately
+  const mySpeechId = ++activeSpeechId;
+  speech.stopSpeaking();
+  if (elevenLabs && elevenLabs.stop) {
+    elevenLabs.stop();
+  }
+
   setAppState('SPEAKING');
 
   const engine = localStorage.getItem('uvision_tts_engine') || 'browser';
-  console.log(`[TTS Engine Dispatch] Active engine: "${engine}", Text: "${text}"`);
 
-  if (engine === 'browser') {
-    console.log('[TTS] Mode: BROWSER_NATIVE (No ElevenLabs credits consumed).');
-    speech.speak(text);
+  if (engine === 'browser' || !elevenLabs.isUsable()) {
+    await speech.speak(text);
     return;
   }
 
-  // ElevenLabs mode (with automatic browser TTS fallback if unconfigured or quota/network fails)
-  if (!elevenLabs.isUsable()) {
-    console.log('[TTS] ElevenLabs not configured, falling back to Browser Native TTS.');
-    speech.speak(text);
-    return;
-  }
-
-  console.log(`[TTS] Mode: ELEVENLABS_API (${text.length} chars, Voice: ${elevenLabs.voiceId})...`);
   ttsProviderLabel.textContent = '⏳ AUDIO: ELEVENLABS...';
   ttsProviderLabel.style.color = '#f59e0b';
 
   const res = await elevenLabs.speak(text, {
     onStart: () => {
-      setAppState('SPEAKING');
-      ttsProviderLabel.textContent = '⚡ AUDIO: ELEVENLABS';
-      ttsProviderLabel.style.color = '#00f2fe';
+      if (mySpeechId === activeSpeechId) {
+        setAppState('SPEAKING');
+        ttsProviderLabel.textContent = '⚡ AUDIO: ELEVENLABS';
+        ttsProviderLabel.style.color = '#00f2fe';
+      }
     },
     onEnd: () => {
-      setAppState('IDLE');
-      ttsProviderLabel.textContent = '⚡ AUDIO: ELEVENLABS';
-      ttsProviderLabel.style.color = '#00f2fe';
+      if (mySpeechId === activeSpeechId) {
+        setAppState('IDLE');
+        ttsProviderLabel.textContent = '⚡ AUDIO: ELEVENLABS';
+        ttsProviderLabel.style.color = '#00f2fe';
+      }
     },
-    onError: () => {
-      speech.speak(text);
-    }
+    onError: () => {}
   });
 
-  if (!res.success) {
+  // Only fall back to Browser TTS if this request wasn't cancelled by a newer speech call
+  if (!res.success && !res.cancelled && mySpeechId === activeSpeechId) {
     console.warn('⚠️ [ElevenLabs Fallback -> Browser TTS]:', res.reason || res.error);
     ttsProviderLabel.textContent = '🔊 AUDIO: BROWSER_FALLBACK';
     ttsProviderLabel.style.color = '#10b981';
-    speech.speak(text);
+    await speech.speak(text);
   }
 }
 
 // Stop all ongoing speech and sound
 function stopAllSpeech() {
+  activeSpeechId++;
   speech.stopSpeaking();
   if (elevenLabs && elevenLabs.stop) {
     elevenLabs.stop();
@@ -394,12 +416,11 @@ function toggleAppLanguage(forcedLang) {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Active Walking Navigation System
-//  - Primary Brain: Gemini 3.1 Flash-Lite continuously evaluates native 1080p POV
-//    snapshots every ~1.5 - 2.0 seconds, providing 1 short actionable navigation command.
-//  - Safety Net / Emergency Brake: Local TFJS COCO-SSD detector runs silently in the background
-//    to catch sudden rapid movement or immediate < 0.5m collision hazards between snapshots.
+//  - Primary Brain: Gemini evaluates POV snapshots ONLY after the previous
+//    spoken instruction has finished playing + a natural walking pause.
+//  - Safety Net / Emergency Brake: Local TFJS COCO-SSD detector catches
+//    sudden close-range hazards and pauses the normal walking loop while warning.
 // ---------------------------------------------------------------------------
 
 const TH_LABELS = {
@@ -434,14 +455,22 @@ let isWalkingStepActive = false;
 let isAwaitingMissionGoal = false;
 let currentNavigationMission = '';
 let lastEmergencyAlertAt = 0;
-const EMERGENCY_COOLDOWN_MS = 2500;
+let lastSpokenGuidance = '';
+let lastSpokenGuidanceAt = 0;
+let walkingSessionId = 0;
+const EMERGENCY_COOLDOWN_MS = 6500;
 
 // Path A: Emergency Brake (local detector catches sudden movement/intrusion between snapshots)
-function handleScene({ emergency }) {
-  if (!isWalkingMode || !emergency) return;
+async function handleScene({ emergency }) {
+  if (!isWalkingMode || isAwaitingMissionGoal || !emergency) return;
   const now = Date.now();
   if (now - lastEmergencyAlertAt < EMERGENCY_COOLDOWN_MS) return;
   lastEmergencyAlertAt = now;
+
+  // Pause scheduled walking step so it doesn't collide with emergency alert
+  clearTimeout(walkingLoopTimer);
+  walkingLoopTimer = null;
+  const sessionAtAlert = ++walkingSessionId;
 
   // Interrupt TTS immediately for safety
   stopAllSpeech();
@@ -450,26 +479,41 @@ function handleScene({ emergency }) {
 
   if (viewportContainer) {
     viewportContainer.classList.add('hazard-detected');
-    setTimeout(() => viewportContainer.classList.remove('hazard-detected'), 1500);
+    setTimeout(() => viewportContainer.classList.remove('hazard-detected'), 1800);
   }
 
   const isEn = currentAppLang === 'en-US';
   const thName = TH_LABELS[emergency.label] || emergency.label || 'สิ่งกีดขวาง';
   const alertMsg = isEn
-    ? (emergency.suddenMotion ? `Watch out! Sudden movement ahead: ${emergency.label}!` : `Stop! ${emergency.label} right ahead!`)
-    : (emergency.suddenMotion ? `ระวัง! มี${thName}เคลื่อนไหวตัดหน้า หยุดก่อน` : `หยุดก่อน! มี${thName}อยู่ตรงหน้ากระทันหัน`);
+    ? (emergency.suddenMotion ? `Watch out! ${emergency.label} moving ahead!` : `Stop! ${emergency.label} right ahead!`)
+    : (emergency.suddenMotion ? `ระวังครับ มี${thName}เคลื่อนไหวข้างหน้า` : `หยุดก่อนครับ มี${thName}อยู่ข้างหน้า`);
 
   ubotResponseText.textContent = alertMsg;
-  speakAnswer(alertMsg);
+  lastSpokenGuidance = alertMsg;
+  lastSpokenGuidanceAt = Date.now();
+  await speakAnswer(alertMsg);
+
+  // Resume normal walking evaluation after user has heard the warning and had 3.5s to react
+  if (isWalkingMode && !isAwaitingMissionGoal && sessionAtAlert === walkingSessionId) {
+    clearTimeout(walkingLoopTimer);
+    walkingLoopTimer = setTimeout(runWalkingGuideStep, 3500);
+  }
 }
 
 // Path B: Goal-Oriented Mission Navigation Step
 async function runWalkingGuideStep() {
   if (!isWalkingMode || isWalkingStepActive || isAwaitingMissionGoal || document.hidden) return;
-  if (currentState === 'LISTENING') return; // User is speaking via push-to-talk
+  if (currentState === 'LISTENING' || currentState === 'SPEAKING') {
+    // Wait until current speech/listening finishes before taking next snapshot
+    clearTimeout(walkingLoopTimer);
+    walkingLoopTimer = setTimeout(runWalkingGuideStep, 1200);
+    return;
+  }
   if (!hub.isLive() && !camera.isUsingCustomImage) return;
 
   isWalkingStepActive = true;
+  const stepSessionId = walkingSessionId;
+
   try {
     const frame = hub.getNativeSnapshot();
     const isEn = currentAppLang === 'en-US';
@@ -477,9 +521,9 @@ async function runWalkingGuideStep() {
 
     const query = isEn
       ? `User's Navigation Mission: "${mission}". Carefully inspect floor path and clearance. Output 1 direct imperative action (< 12 words) telling user what to do next. If destination is reached, say: "Mission complete, arrived at destination."`
-      : `ภารกิจนำทางของผู้ใช้: "${mission}"\nจงดูภาพและลานพื้นทางเดินตรงหน้า บอกคำสั่งปฏิบัติการ 1 ประโยคสั้นมาก (< 12 คำ) บอกชัดเจนว่าให้คนทำอะไรเพื่อมุ่งหน้าสู่เป้าหมาย (เช่น "ทางตรงหน้าโล่ง เดินตรงไปได้ 3 ก้าวครับ", "มีเก้าอี้ตรงหน้า ให้เบี่ยงซ้าย 1 ก้าว", "ข้างหน้าติดกำแพง ให้หันขวา 90 องศา") หากพามาถึงเป้าหมายแล้ว ให้บอกว่า "ถึงเป้าหมายเรียบร้อยแล้วครับ ภารกิจเสร็จสิ้น"`;
+      : `ภารกิจนำทางของผู้ใช้: "${mission}"\nจงดูภาพและลานพื้นทางเดินตรงหน้า บอกคำสั่งปฏิบัติการ 1 ประโยคสั้นกระชับ (< 12 คำ) ว่าให้เดินอย่างไรต่อ (เช่น "ทางตรงหน้าโล่ง เดินตรงไปได้ 3 ก้าวครับ", "มีเก้าอี้ตรงหน้า ให้เบี่ยงซ้าย 1 ก้าว", "ข้างหน้าติดกำแพง ให้หันขวา 90 องศา") หากพามาถึงเป้าหมายแล้ว ให้บอกว่า "ถึงเป้าหมายเรียบร้อยแล้วครับ ภารกิจเสร็จสิ้น"`;
 
-    statusBadge.textContent = isEn ? `🚶‍♂️ ${mission}` : `🚶‍♂️ ${mission}`;
+    statusBadge.textContent = `🚶‍♂️ ${mission}`;
 
     const result = await aiService.askUbot({
       imageBase64: frame.base64Data,
@@ -489,13 +533,13 @@ async function runWalkingGuideStep() {
       detections: hub.getDetectionsSummary()
     });
 
-    if (!isWalkingMode || isAwaitingMissionGoal) return;
+    // Abort if walking mode was turned off or interrupted by an emergency alert while Gemini was thinking
+    if (!isWalkingMode || isAwaitingMissionGoal || stepSessionId !== walkingSessionId) return;
 
     if (result && result.text) {
       const guidance = result.text.trim();
       ubotResponseText.textContent = guidance;
       if (viewportContainer) viewportContainer.classList.remove('hazard-detected');
-      await speakAnswer(guidance);
 
       // Check if mission reached completion
       const isCompleted = /ถึงเป้าหมาย|ภารกิจเสร็จสิ้น|mission complete|arrived at destination/i.test(guidance);
@@ -503,39 +547,53 @@ async function runWalkingGuideStep() {
         triggerHaptic([100, 50, 100, 50, 300]);
         playResponseSound();
         statusBadge.textContent = isEn ? '✅ MISSION COMPLETE' : '✅ สำเร็จภารกิจ';
-        setTimeout(() => {
-          if (isWalkingMode) toggleWalkingMode(false);
-        }, 2800);
+        await speakAnswer(guidance);
+        if (isWalkingMode) toggleWalkingMode(false);
         return;
       }
 
-      // Step-aware pacing: adapt next evaluation delay to how many steps human needs to walk
+      // Avoid repeating the exact same sentence back-to-back within 7 seconds
+      const now = Date.now();
+      const isDuplicate = guidance === lastSpokenGuidance && (now - lastSpokenGuidanceAt < 7000);
+      if (!isDuplicate) {
+        lastSpokenGuidance = guidance;
+        lastSpokenGuidanceAt = now;
+        // Wait until TTS audio has COMPLETELY finished playing before starting the next walk timer!
+        await speakAnswer(guidance);
+      }
+
+      if (!isWalkingMode || isAwaitingMissionGoal || stepSessionId !== walkingSessionId) return;
+
+      // Natural post-speech walking pause so user has time to actually walk the steps
       const stepMatch = guidance.match(/(\d+)\s*ก้าว/) || guidance.match(/(\d+)\s*step/i);
-      const steps = stepMatch ? parseInt(stepMatch[1], 10) : 2;
-      const walkPacingDelay = Math.max(1800, steps * 800 + 1200);
+      const steps = stepMatch ? Math.min(5, parseInt(stepMatch[1], 10)) : 2;
+      const walkPacingDelay = Math.max(3200, steps * 1200 + 1500);
 
       clearTimeout(walkingLoopTimer);
       walkingLoopTimer = setTimeout(runWalkingGuideStep, walkPacingDelay);
     }
   } catch (err) {
     console.warn('Walking guide step error:', err);
-    if (isWalkingMode) {
+    if (isWalkingMode && stepSessionId === walkingSessionId) {
       clearTimeout(walkingLoopTimer);
-      walkingLoopTimer = setTimeout(runWalkingGuideStep, 2000);
+      walkingLoopTimer = setTimeout(runWalkingGuideStep, 4000);
     }
   } finally {
     isWalkingStepActive = false;
   }
 }
 
-function toggleWalkingMode(forceState, targetMission) {
+async function toggleWalkingMode(forceState, targetMission) {
   isWalkingMode = typeof forceState === 'boolean' ? forceState : !isWalkingMode;
+  const mySessionId = ++walkingSessionId;
 
   clearTimeout(walkingLoopTimer);
   clearTimeout(missionPromptTimer);
   walkingLoopTimer = null;
   missionPromptTimer = null;
   isWalkingStepActive = false;
+  lastSpokenGuidance = '';
+  lastSpokenGuidanceAt = 0;
 
   if (btnToggleWalkMode) {
     btnToggleWalkMode.classList.toggle('active', isWalkingMode);
@@ -554,6 +612,7 @@ function toggleWalkingMode(forceState, targetMission) {
   }
 
   if (isWalkingMode) {
+    stopAllSpeech();
     playChirpSound();
     triggerHaptic([150, 80, 150]);
 
@@ -562,64 +621,73 @@ function toggleWalkingMode(forceState, targetMission) {
       isAwaitingMissionGoal = false;
       currentNavigationMission = targetMission;
       const isEn = currentAppLang === 'en-US';
-      const ack = isEn ? `Starting mission: ${currentNavigationMission}...` : `รับทราบครับ กำลังพานำทาง${currentNavigationMission}...`;
-      statusBadge.textContent = isEn ? `🚶‍♂️ ${currentNavigationMission}` : `🚶‍♂️ ${currentNavigationMission}`;
+      const ack = isEn ? `Starting mission: ${currentNavigationMission}` : `รับทราบครับ กำลังพานำทาง${currentNavigationMission}`;
+      statusBadge.textContent = `🚶‍♂️ ${currentNavigationMission}`;
       ubotResponseText.textContent = ack;
-      speakAnswer(ack);
-      setTimeout(runWalkingGuideStep, 1200);
+      await speakAnswer(ack);
+      if (isWalkingMode && mySessionId === walkingSessionId) {
+        walkingLoopTimer = setTimeout(runWalkingGuideStep, 800);
+      }
     } else {
-      // Solicit navigation goal from the user
-      isAwaitingMissionGoal = true;
-      statusBadge.textContent = currentAppLang === 'en-US' ? '🚶‍♂️ AWAITING MISSION' : '🚶‍♂️ รอรับคำสั่งเป้าหมาย';
-      const promptMsg = currentAppLang === 'en-US'
-        ? 'Navigation ready. State your destination, such as to the door, or straight ahead.'
-        : 'โหมดนำทางพร้อมแล้วครับ บอกเป้าหมายได้เลย เช่น "พาไปที่ประตู" หรือ "พาเดินตรงไปข้างหน้า" ครับ';
-      ubotResponseText.textContent = promptMsg;
-      speakAnswer(promptMsg);
+      // Start continuous room/path navigation immediately so user can walk & avoid obstacles right away!
+      isAwaitingMissionGoal = false;
+      currentNavigationMission = currentAppLang === 'en-US'
+        ? 'Walk safely and avoid obstacles around the room'
+        : 'เดินสำรวจและหลบสิ่งกีดขวางอย่างปลอดภัย';
+      const startMsg = currentAppLang === 'en-US'
+        ? 'Walking mode active. Scanning path ahead.'
+        : 'เปิดโหมดเดินนำทางแล้วครับ กำลังดูทางข้างหน้าให้ครับ';
+      statusBadge.textContent = currentAppLang === 'en-US' ? '🚶‍♂️ WALK MODE: ON' : '🚶‍♂️ กำลังนำทาง';
+      ubotResponseText.textContent = startMsg;
 
-      // Open mic to listen for the user's destination
-      setTimeout(() => {
-        if (isWalkingMode && isAwaitingMissionGoal) {
-          speech.startListening();
-        }
-      }, 1200);
-
-      // Auto-fallback: if user stays silent for 6s, default to walking straight ahead
-      missionPromptTimer = setTimeout(() => {
-        if (isWalkingMode && isAwaitingMissionGoal) {
-          isAwaitingMissionGoal = false;
-          currentNavigationMission = currentAppLang === 'en-US' ? 'Walk straight ahead safely' : 'เดินตรงไปข้างหน้าอย่างปลอดภัย';
-          const startMsg = currentAppLang === 'en-US' ? 'Starting: Walk straight ahead...' : 'เริ่มภารกิจ: นำทางเดินตรงไปข้างหน้าครับ';
-          ubotResponseText.textContent = startMsg;
-          statusBadge.textContent = currentAppLang === 'en-US' ? '🚶‍♂️ WALK STRAIGHT' : '🚶‍♂️ เดินตรงไป';
-          speakAnswer(startMsg);
-          setTimeout(runWalkingGuideStep, 1000);
-        }
-      }, 6500);
+      await speakAnswer(startMsg);
+      if (isWalkingMode && mySessionId === walkingSessionId) {
+        walkingLoopTimer = setTimeout(runWalkingGuideStep, 600);
+      }
     }
   } else {
     isAwaitingMissionGoal = false;
     currentNavigationMission = '';
+    speech.stopListening();
     stopAllSpeech();
     playResponseSound();
     triggerHaptic([100]);
     statusBadge.textContent = currentAppLang === 'en-US' ? 'READY' : 'พร้อมรับคำสั่ง';
     const stopMsg = currentAppLang === 'en-US' ? 'Walking mode deactivated.' : 'ปิดโหมดเดินนำทางแล้วครับ';
     ubotResponseText.textContent = stopMsg;
-    speakAnswer(stopMsg);
+    await speakAnswer(stopMsg);
   }
 }
 
+// Unlock mobile audio (iOS Safari / Android Chrome) on first user touch/click anywhere
+function unlockMobileAudioOnce() {
+  elevenLabs.unlockAudio();
+}
+window.addEventListener('touchstart', unlockMobileAudioOnce, { once: true, passive: true });
+window.addEventListener('click', unlockMobileAudioOnce, { once: true });
+
 // Push-To-Talk Toggle
 async function triggerPtt() {
+  elevenLabs.unlockAudio();
+
   if (currentState === 'LISTENING') {
     speech.stopListening();
     if (activeQuestion.trim()) {
       handleUserQuerySubmit(activeQuestion);
     } else {
       setAppState('IDLE');
+      if (isWalkingMode) {
+        clearTimeout(walkingLoopTimer);
+        walkingLoopTimer = setTimeout(runWalkingGuideStep, 1500);
+      }
     }
   } else {
+    // Pause any ongoing speech or Walk Mode timer while user asks a question
+    clearTimeout(walkingLoopTimer);
+    walkingLoopTimer = null;
+    walkingSessionId++;
+    stopAllSpeech();
+
     // Snap frame immediately upon pressing talk!
     captureFrameSnapshot();
     playChirpSound();
@@ -627,13 +695,13 @@ async function triggerPtt() {
     userQuestionEcho.textContent = '';
     const res = await speech.startListening();
     if (!res.supported) {
-      if (res.reason === 'unsupported_browser') {
-        ubotResponseText.textContent = 'เบราว์เซอร์นี้ไม่รองรับการแปลงเสียงพูด แนะนำให้เปิดด้วย Google Chrome หรือ Microsoft Edge นะครับ';
-      }
-      const defaultQuestion = currentAppLang === 'en-US' ? 'What is in front of me? Any hazards?' : 'นี่คืออะไร มีจุดไหนต้องระวังไหม?';
-      const manualPrompt = prompt(currentAppLang === 'en-US' ? 'Enter question for U-bot (or use Chrome for voice):' : 'พิมพ์คำถามถึง Ubot สำหรับภาพนี้ (หรือใช้ Chrome/Edge เพื่อพูดได้โดยตรง):', defaultQuestion);
+      const defaultQuestion = currentAppLang === 'en-US' ? 'What is in front of me? Describe in detail.' : 'ตรงหน้านี้คืออะไร ช่วยบอกรายละเอียดหน่อย';
+      const manualPrompt = prompt(currentAppLang === 'en-US' ? 'Ask VisionBot about this view:' : 'พิมพ์คำถามถึง VisionBot สำหรับภาพตรงหน้านี้:', defaultQuestion);
       if (manualPrompt) {
         handleUserQuerySubmit(manualPrompt);
+      } else if (isWalkingMode) {
+        clearTimeout(walkingLoopTimer);
+        walkingLoopTimer = setTimeout(runWalkingGuideStep, 1500);
       }
     }
   }

@@ -1,4 +1,4 @@
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || process.env.elevenlab || process.env.elevenlabs || '';
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'H9eYlNHpm1vah6PPgYAk';
 
 export default function handler(req, res) {

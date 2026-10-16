@@ -6,10 +6,40 @@ export class ElevenLabsManager {
   constructor({ apiKey = '', voiceId = 'H9eYlNHpm1vah6PPgYAk' } = {}) {
     this.apiKey = apiKey || '';
     this.voiceId = voiceId || 'H9eYlNHpm1vah6PPgYAk';
-    this.currentAudio = null;
+    this.currentAudio = typeof Audio !== 'undefined' ? new Audio() : null;
+    if (this.currentAudio) {
+      this.currentAudio.playsInline = true;
+      this.currentAudio.preload = 'auto';
+    }
+    this.audioUnlocked = false;
     this.available = null; // null = unchecked, true = usable, false = unusable
     this.isPlaying = false;
     this.serverConfigured = false;
+    this.requestId = 0;
+    this.abortController = null;
+    this.currentResolve = null;
+  }
+
+  /**
+   * Unlocks HTMLAudioElement on mobile browsers (iOS Safari / Android Chrome)
+   * Must be called synchronously inside a user tap/click handler.
+   */
+  unlockAudio() {
+    if (this.audioUnlocked || !this.currentAudio) return;
+    try {
+      // Tiny silent WAV data URI to prime the audio element on mobile user gesture
+      this.currentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      const p = this.currentAudio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          this.currentAudio.pause();
+          this.currentAudio.currentTime = 0;
+          this.audioUnlocked = true;
+        }).catch(() => {});
+      }
+    } catch (e) {
+      // Ignored
+    }
   }
 
   setCredentials(apiKey, voiceId) {
@@ -73,10 +103,11 @@ export class ElevenLabsManager {
   }
 
   /**
-   * Generates and plays audio from ElevenLabs API (via secure server proxy or direct client key)
+   * Generates and plays audio from ElevenLabs API (via secure server proxy or direct client key).
+   * Resolves ONLY when playback has finished (or was cancelled/failed) so callers never overlap speech.
    * @param {string} text - Text to synthesize
    * @param {object} callbacks - { onStart, onEnd, onError }
-   * @returns {Promise<{ success: boolean, fallbackNeeded: boolean }>}
+   * @returns {Promise<{ success: boolean, cancelled?: boolean, fallbackNeeded: boolean }>}
    */
   async speak(text, { onStart = () => {}, onEnd = () => {}, onError = () => {} } = {}) {
     this.stop();
@@ -84,6 +115,10 @@ export class ElevenLabsManager {
     if (!this.isUsable()) {
       return { success: false, fallbackNeeded: true, reason: 'ElevenLabs ไม่พร้อมใช้งาน' };
     }
+
+    const myReqId = ++this.requestId;
+    const controller = new AbortController();
+    this.abortController = controller;
 
     let audioBlob = null;
     let lastErrorDetails = '';
@@ -94,7 +129,6 @@ export class ElevenLabsManager {
     if (this.apiKey && this.apiKey.length > 10) {
       try {
         const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`;
-        // eleven_v3 is the ONLY ElevenLabs model that natively supports Thai (language_code: 'th')
         const payload = {
           text: formattedText,
           model_id: 'eleven_v3',
@@ -107,7 +141,6 @@ export class ElevenLabsManager {
           }
         };
 
-        console.log(`📡 [ElevenLabs Direct] POST /v1/text-to-speech/${this.voiceId} [model: ${payload.model_id}, lang: ${payload.language_code || 'auto'}] (${formattedText.length} chars)`);
         let response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -115,10 +148,14 @@ export class ElevenLabsManager {
             'Content-Type': 'application/json',
             'xi-api-key': this.apiKey
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal: controller.signal
         });
 
-        // Fallback if eleven_v3 fails for any reason
+        if (myReqId !== this.requestId) {
+          return { success: true, cancelled: true, fallbackNeeded: false };
+        }
+
         if (!response.ok && response.status === 400) {
           delete payload.language_code;
           response = await fetch(url, {
@@ -128,29 +165,31 @@ export class ElevenLabsManager {
               'Content-Type': 'application/json',
               'xi-api-key': this.apiKey
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: controller.signal
           });
         }
 
-        lastErrorDetails = '';
+        if (myReqId !== this.requestId) {
+          return { success: true, cancelled: true, fallbackNeeded: false };
+        }
 
         if (response.ok) {
           audioBlob = await response.blob();
-          console.log('✅ [ElevenLabs Direct] Audio received! (Native Thai eleven_v3)');
         } else {
           const errBody = await response.text();
           lastErrorDetails = `Direct API Status ${response.status}: ${errBody}`;
-          console.warn('❌ [ElevenLabs Direct] API returned status:', response.status, errBody);
         }
       } catch (err) {
-        console.warn('⚠️ [ElevenLabs Direct] CORS or network blocked, trying server proxy:', err.message);
+        if (err.name === 'AbortError' || myReqId !== this.requestId) {
+          return { success: true, cancelled: true, fallbackNeeded: false };
+        }
       }
     }
 
     // 2. Use Server Proxy (/api/tts) which securely uses process.env.ELEVENLABS_API_KEY
-    if (!audioBlob) {
+    if (!audioBlob && myReqId === this.requestId) {
       try {
-        console.log(`📡 [ElevenLabs Proxy] Sending via /api/tts (${formattedText.length} chars)...`);
         const proxyRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -158,59 +197,114 @@ export class ElevenLabsManager {
             text: formattedText,
             voiceId: this.voiceId,
             apiKey: this.apiKey || undefined
-          })
+          }),
+          signal: controller.signal
         });
+
+        if (myReqId !== this.requestId) {
+          return { success: true, cancelled: true, fallbackNeeded: false };
+        }
+
         if (proxyRes.ok) {
           audioBlob = await proxyRes.blob();
-          console.log('✅ [ElevenLabs Proxy] Audio received via proxy! Characters consumed from your ElevenLabs quota.');
         } else {
           const proxyErr = await proxyRes.text();
           lastErrorDetails = `Proxy Status ${proxyRes.status}: ${proxyErr}`;
-          console.error('❌ [ElevenLabs Proxy] Server error:', proxyRes.status, proxyErr);
         }
       } catch (proxyErr) {
+        if (proxyErr.name === 'AbortError' || myReqId !== this.requestId) {
+          return { success: true, cancelled: true, fallbackNeeded: false };
+        }
         lastErrorDetails = `Connection failed: ${proxyErr.message}`;
-        console.warn('❌ [ElevenLabs Proxy] Connection failed:', proxyErr.message);
       }
+    }
+
+    if (myReqId !== this.requestId) {
+      return { success: true, cancelled: true, fallbackNeeded: false };
     }
 
     if (!audioBlob) {
       return { success: false, fallbackNeeded: true, error: lastErrorDetails, reason: lastErrorDetails || 'ElevenLabs synthesis failed' };
     }
 
-    try {
-      const audioUrl = URL.createObjectURL(audioBlob);
-      this.currentAudio = new Audio(audioUrl);
+    return new Promise((resolve) => {
+      if (myReqId !== this.requestId) {
+        resolve({ success: true, cancelled: true, fallbackNeeded: false });
+        return;
+      }
 
-      this.currentAudio.onplay = () => {
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = this.currentAudio || new Audio();
+      this.currentAudio = audio;
+
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (this.currentResolve === finish) this.currentResolve = null;
+        this.isPlaying = false;
+        URL.revokeObjectURL(audioUrl);
+        resolve(result);
+      };
+      this.currentResolve = finish;
+
+      audio.onplay = () => {
+        if (myReqId !== this.requestId) {
+          audio.pause();
+          finish({ success: true, cancelled: true, fallbackNeeded: false });
+          return;
+        }
         this.isPlaying = true;
+        this.audioUnlocked = true;
         onStart();
       };
 
-      this.currentAudio.onended = () => {
-        this.isPlaying = false;
-        URL.revokeObjectURL(audioUrl);
+      audio.onended = () => {
         onEnd();
+        finish({ success: true, fallbackNeeded: false });
       };
 
-      this.currentAudio.onerror = (e) => {
-        this.isPlaying = false;
-        URL.revokeObjectURL(audioUrl);
+      audio.onerror = (e) => {
         onError(e);
+        finish({ success: false, fallbackNeeded: true, reason: 'Audio decode error' });
       };
 
-      await this.currentAudio.play();
-      return { success: true, fallbackNeeded: false };
-    } catch (err) {
-      return { success: false, fallbackNeeded: true, reason: err.message };
-    }
+      audio.src = audioUrl;
+      audio.load();
+      audio.play().catch((err) => {
+        if (myReqId !== this.requestId || err.name === 'AbortError') {
+          finish({ success: true, cancelled: true, fallbackNeeded: false });
+        } else {
+          finish({ success: false, fallbackNeeded: true, reason: err.message });
+        }
+      });
+    });
   }
 
   stop() {
+    this.requestId++;
+    if (this.abortController) {
+      try {
+        this.abortController.abort();
+      } catch (e) {
+        // Ignored
+      }
+      this.abortController = null;
+    }
     if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio.currentTime = 0;
-      this.currentAudio = null;
+      try {
+        this.currentAudio.onplay = null;
+        this.currentAudio.onended = null;
+        this.currentAudio.onerror = null;
+        this.currentAudio.pause();
+      } catch (e) {
+        // Ignored
+      }
+    }
+    if (this.currentResolve) {
+      const fn = this.currentResolve;
+      this.currentResolve = null;
+      fn({ success: true, cancelled: true, fallbackNeeded: false });
     }
     this.isPlaying = false;
   }

@@ -87,10 +87,10 @@ export class CameraManager {
   }
 
   /**
-   * Captures the current frame. maxDimension = 0 (default) keeps NATIVE resolution
-   * (used for Gemini inspection). Only pass a value for explicit downscaling.
+   * Captures the current frame. Defaults to maxDimension = 1280 and JPEG quality 0.80
+   * so mobile 4K cameras stay well under Vercel Serverless 4.5MB request limits and upload fast.
    */
-  captureFrame(maxDimension = 0) {
+  captureFrame(maxDimension = 1280) {
     const ctx = this.canvas.getContext('2d');
     let sourceWidth, sourceHeight;
 
@@ -105,13 +105,14 @@ export class CameraManager {
     let targetWidth = sourceWidth;
     let targetHeight = sourceHeight;
 
-    if (maxDimension > 0 && (targetWidth > maxDimension || targetHeight > maxDimension)) {
+    const maxDim = maxDimension > 0 ? maxDimension : 1280;
+    if (targetWidth > maxDim || targetHeight > maxDim) {
       if (targetWidth > targetHeight) {
-        targetHeight = Math.round((targetHeight * maxDimension) / targetWidth);
-        targetWidth = maxDimension;
+        targetHeight = Math.round((targetHeight * maxDim) / targetWidth);
+        targetWidth = maxDim;
       } else {
-        targetWidth = Math.round((targetWidth * maxDimension) / targetHeight);
-        targetHeight = maxDimension;
+        targetWidth = Math.round((targetWidth * maxDim) / targetHeight);
+        targetHeight = maxDim;
       }
     }
 
@@ -124,8 +125,8 @@ export class CameraManager {
       ctx.drawImage(this.video, 0, 0, targetWidth, targetHeight);
     }
 
-    // In-memory JPEG (no temp files), quality 0.92
-    const dataUrl = this.canvas.toDataURL('image/jpeg', 0.92);
+    // In-memory JPEG, quality 0.82 (~150-250KB, fast over 4G/5G/WiFi and safe for Vercel Serverless)
+    const dataUrl = this.canvas.toDataURL('image/jpeg', 0.82);
     const base64Data = dataUrl.split(',')[1];
 
     return {

@@ -208,11 +208,11 @@ export class Detector {
       const centerX = (x + bw / 2) / vw;
       const inWalkingCorridor = centerX >= 0.22 && centerX <= 0.78;
 
-      // 1. Sudden movement intrusion (someone or something moves quickly in path between snapshots)
-      const suddenMovementHazard = isHighMotion && inWalkingCorridor && area >= 0.14 && bottom >= 0.65;
+      // 1. Sudden movement intrusion (someone or something moves quickly right into center path)
+      const suddenMovementHazard = isHighMotion && inWalkingCorridor && area >= 0.28 && bottom >= 0.78;
 
-      // 2. Immediate proximity hazard (object right in front of chest/feet < 0.5m)
-      const proximityHazard = area >= 0.35 || (bottom >= 0.85 && area >= 0.20);
+      // 2. Immediate proximity hazard (large object right in front of chest/feet < 0.5m)
+      const proximityHazard = inWalkingCorridor && (area >= 0.48 || (bottom >= 0.90 && area >= 0.32));
 
       if (suddenMovementHazard || proximityHazard) {
         if (!emergency || area > emergency.area) {
@@ -226,10 +226,10 @@ export class Detector {
       }
     }
 
-    // Emergency brake streak (needs 2 consecutive frames to prevent light flicker)
+    // Emergency brake streak (needs 3 consecutive frames to prevent false positives)
     if (emergency) {
       this.obstacleStreak++;
-      if (this.obstacleStreak >= 2) {
+      if (this.obstacleStreak >= 3) {
         this.onScene({ emergency });
         return;
       }
