@@ -584,10 +584,14 @@ function appHandler(req, res) {
 
   // Normalize URL for static files
   let reqPath = decodeURI(req.url.split('?')[0]);
-  if (reqPath === '/') reqPath = '/index.html';
+  if (reqPath === '/' || !reqPath) reqPath = '/index.html';
 
   const safePath = path.normalize(reqPath).replace(/^(\.\.[/\\])+/, '');
-  const filePath = path.join(__dirname, safePath);
+  // Try process.cwd() first (standard in Vercel Serverless environment), fallback to __dirname
+  let filePath = path.join(process.cwd(), safePath);
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(__dirname, safePath);
+  }
 
   fs.stat(filePath, (err, stats) => {
     if (err || !stats.isFile()) {
